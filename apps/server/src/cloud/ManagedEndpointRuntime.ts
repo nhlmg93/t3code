@@ -185,8 +185,8 @@ export const make = Effect.gen(function* () {
     yield* stopConnector(active);
   });
 
-  const superviseConnector = (connector: ActiveConnector) =>
-    Effect.gen(function* () {
+  const superviseConnector = Effect.fn("ManagedEndpointRuntime.superviseConnector")(
+    function* (connector: ActiveConnector) {
       const result = yield* Effect.result(connector.child.exitCode);
       const activeAtExit = yield* Ref.get(activeRef);
       if (
@@ -253,9 +253,9 @@ export const make = Effect.gen(function* () {
           yield* reconcileConfig(desiredConfig);
         }),
       );
-    }).pipe(
-      Effect.catchCause((cause) => Effect.logWarning("Relay client supervisor failed", { cause })),
-    );
+    },
+    Effect.catchCause((cause) => Effect.logWarning("Relay client supervisor failed", { cause })),
+  );
 
   // The new connector starts next to the old one on the same tunnel, and the
   // old one stops only once the new one registers, so clients never see the
@@ -370,8 +370,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.forkIn(retryPinnedRelayClientInstall, runtimeScope);
   });
 
-  const watchConnectorRegistration = (connector: ActiveConnector) =>
-    Effect.gen(function* () {
+  const watchConnectorRegistration = Effect.fn("ManagedEndpointRuntime.watchConnectorRegistration")(
+    function* (connector: ActiveConnector) {
       yield* Effect.sleep(CONNECTOR_REGISTRATION_TIMEOUT);
       if (yield* Deferred.isDone(connector.registered)) return true;
       yield* Effect.logWarning(
@@ -384,11 +384,13 @@ export const make = Effect.gen(function* () {
       );
       yield* Queue.offer(recoveryRequests, connector.config);
       return false;
-    }).pipe(Effect.repeat({ until: (connected) => connected }));
+    },
+    Effect.repeat({ until: (connected) => connected }),
+  );
 
   // Only an explicit 503 counts: a failed request says nothing about the
-  const watchConnectorReadiness = (connector: ActiveConnector) =>
-    Effect.gen(function* () {
+  const watchConnectorReadiness = Effect.fn("ManagedEndpointRuntime.watchConnectorReadiness")(
+    function* (connector: ActiveConnector) {
       const readyUrl = `http://${yield* Deferred.await(connector.metricsAddress)}/ready`;
       let notReadyChecks = 0;
       while (true) {
@@ -423,7 +425,8 @@ export const make = Effect.gen(function* () {
         });
         yield* connector.child.kill().pipe(Effect.ignore);
       }
-    });
+    },
+  );
 
   const observeConnectorOutput = (connector: ActiveConnector) => {
     let rejectedRegistrations = 0;
