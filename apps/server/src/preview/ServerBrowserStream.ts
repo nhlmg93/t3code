@@ -51,9 +51,8 @@ const parseMessage = (chunk: Uint8Array | string): unknown => {
   }
 };
 
-const makeHandler = Effect.fn("ServerBrowserStream.makeHandler")(function* (
-  browser: ServerBrowser.ServerBrowser["Service"],
-) {
+// Request middleware owns tracing, including long-lived WebSocket sessions.
+const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBrowser["Service"]) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = HttpServerRequest.toURL(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
@@ -221,7 +220,8 @@ const isSandboxError = Schema.is(PreviewBrowserHost.PreviewBrowserSandboxError);
 const isLibrariesError = Schema.is(PreviewBrowserHost.PreviewBrowserLibrariesError);
 const encodeHostSetup = Schema.encodeSync(Schema.fromJsonString(PreviewStreamHostSetup));
 
-const serveDownload = Effect.fn("ServerBrowserStream.serveDownload")(function* (
+// The request span already covers this download route.
+const serveDownload = Effect.fnUntraced(function* (
   browser: ServerBrowser.ServerBrowser["Service"],
   params: URLSearchParams,
 ) {
@@ -243,7 +243,8 @@ const serveDownload = Effect.fn("ServerBrowserStream.serveDownload")(function* (
 const UPLOAD_MAX_FILE_BYTES = 100 * 1024 * 1024;
 const UPLOAD_MAX_FILES = 20;
 
-const receiveUpload = Effect.fn("ServerBrowserStream.receiveUpload")(
+// The request span already covers this upload route.
+const receiveUpload = Effect.fnUntraced(
   function* (browser: ServerBrowser.ServerBrowser["Service"], params: URLSearchParams) {
     yield* authenticateMediaRequest(AuthPreviewOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
