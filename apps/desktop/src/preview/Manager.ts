@@ -2375,7 +2375,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   // The scheme is read after the session attaches so a concurrent setColorScheme is not
   // overwritten with a stale snapshot.
-  const restoreControlSession = Effect.fn("Manager.restoreControlSession")(
+  const restoreControlSession = Effect.fn("PreviewManager.restoreControlSession")(
     function* (tabId: string, wc: Electron.WebContents) {
       const beforeAttach = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
       if (beforeAttach?.webContentsId !== wc.id) return;
