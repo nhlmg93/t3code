@@ -33,7 +33,8 @@ export const layer = HttpApiBuilder.group(
      * The endpoint is raw so the signature is checked over the exact body
      * bytes; the service checks the token and signature.
      */
-    const handler = Effect.fn("webhookRoute.handler")(function* ({
+    // Only verified relay deliveries join a trace; direct requests keep their existing context.
+    const handler = Effect.fnUntraced(function* ({
       params,
       request,
     }: {
