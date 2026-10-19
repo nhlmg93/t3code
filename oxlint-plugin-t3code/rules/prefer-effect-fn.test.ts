@@ -50,6 +50,29 @@ describe("t3code/prefer-effect-fn", () => {
   );
 
   rule.valid(
+    "allows reference default-value callbacks",
+    `
+    import * as Context from "effect/Context";
+    import * as Effect from "effect/Effect";
+    export const Default = Context.Reference("Default", {
+      defaultValue: () => Effect.gen(function* () { yield* Effect.void; }),
+    });
+  `,
+  );
+
+  for (const name of ["onSome", "onNone", "onSuccess", "onFailure", "defaultValue"]) {
+    rule.invalid(
+      `reports service members named ${name}`,
+      `
+      import * as Effect from "effect/Effect";
+      export const service = Service.of({
+        ${name}: () => Effect.gen(function* () { yield* Effect.void; }),
+      });
+    `,
+    );
+  }
+
+  rule.valid(
     "does not mistake other namespaces or shadowed locals for Effect",
     `
     import * as Effect from "effect/Effect";

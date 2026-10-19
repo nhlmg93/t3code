@@ -1,7 +1,5 @@
 import { defineRule, type ESTree } from "@oxlint/plugins";
 
-const CALLBACK_NAMES = new Set(["onSome", "onNone", "onSuccess", "onFailure", "defaultValue"]);
-
 export default defineRule({
   meta: {
     type: "suggestion",
@@ -73,17 +71,20 @@ export default defineRule({
               : parent.key.type === "Literal"
                 ? parent.key.value
                 : undefined;
-          if (typeof name === "string" && CALLBACK_NAMES.has(name)) return;
           const call = parent.parent.parent;
-          if (
-            call?.type === "CallExpression" &&
-            call.callee.type === "MemberExpression" &&
-            call.callee.property.type === "Identifier" &&
-            ["catchTags", "match", "matchEffect", "matchCauseEffect"].includes(
-              call.callee.property.name,
-            )
-          ) {
-            return;
+          if (call?.type === "CallExpression") {
+            let callee = call.callee;
+            while (callee.type === "CallExpression") callee = callee.callee;
+            if (callee.type === "MemberExpression" && callee.property.type === "Identifier") {
+              if (
+                ["catchTags", "match", "matchEffect", "matchCauseEffect"].includes(
+                  callee.property.name,
+                ) ||
+                (name === "defaultValue" && callee.property.name === "Reference")
+              ) {
+                return;
+              }
+            }
           }
         } else if (parent.type !== "VariableDeclarator" && parent.type !== "PropertyDefinition") {
           return;
