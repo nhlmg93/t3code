@@ -508,7 +508,7 @@ export const make = Effect.gen(function* () {
         ok: response.ok,
         deliveries: deliveryStats(response.deliveries),
       });
-    }, withRelayClientTracing);
+    });
 
     // Per-thread shell read: this publish runs for every activity-relevant
     // domain event, so materializing the full shell here would make the cost
@@ -613,7 +613,7 @@ export const make = Effect.gen(function* () {
       projectId: snapshot.projectId,
       state: snapshot.state,
       reason: snapshot.reason,
-    });
+    }).pipe(withRelayClientTracing);
     publishConfirmDeadlines.delete(threadId);
     yield* Ref.update(publishedStateByThreadRef, (publishedStates) => {
       const nextPublishedStates = new Map(publishedStates);
