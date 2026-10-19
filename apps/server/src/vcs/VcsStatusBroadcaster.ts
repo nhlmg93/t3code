@@ -532,7 +532,8 @@ export const make = Effect.gen(function* () {
       );
     });
 
-  const makeRemoteRefreshLoop = Effect.fn("VcsStatusBroadcaster.makeRemoteRefreshLoop")(function* (
+  // A subscription owns this loop; keep each poll's spans out of a never-ending parent span.
+  const makeRemoteRefreshLoop = Effect.fnUntraced(function* (
     cwd: string,
     demandCwdsRef: Ref.Ref<ReadonlyMap<string, number>>,
     automaticRemoteRefreshInterval: Effect.Effect<Duration.Duration, never>,

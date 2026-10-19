@@ -279,9 +279,8 @@ export function resolveNativeSampleIntervalMs(
   return SAMPLE_INTERVAL_MS;
 }
 
-export const commitCollectionControlUpdate = Effect.fn(
-  "NativeTelemetryClient.commitCollectionControlUpdate",
-)(function* <E, R>(
+// Desktop power samples also commit control state; avoid a span for each sample.
+export const commitCollectionControlUpdate = Effect.fnUntraced(function* <E, R>(
   desiredState: Ref.Ref<CollectionControl>,
   appliedState: Ref.Ref<CollectionControl>,
   update: (current: CollectionControl) => CollectionControl,
@@ -776,9 +775,11 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     Effect.forkScoped,
   );
 
-  const applyCollectionControl = Effect.fn(
-    "resourceTelemetry.nativeTelemetryClient.applyCollectionControl",
-  )(function* (previous: CollectionControl, next: CollectionControl) {
+  // Desktop power samples reach this even when the control state has not changed.
+  const applyCollectionControl = Effect.fnUntraced(function* (
+    previous: CollectionControl,
+    next: CollectionControl,
+  ) {
     const current = yield* Ref.get(state);
     if (canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) {
       const handle = Option.getOrThrow(current.handle);
@@ -841,18 +842,18 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
     }),
   );
 
-  const setExternalProcesses: NativeTelemetryClient["Service"]["setExternalProcesses"] = Effect.fn(
-    "NativeTelemetryClient.setExternalProcesses",
-  )(function* (processes) {
-    yield* Ref.set(externalProcesses, [...processes]);
-    const current = yield* Ref.get(state);
-    if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) return;
-    yield* writeCommand(Option.getOrThrow(current.handle), {
-      version: RESOURCE_MONITOR_PROTOCOL_VERSION,
-      type: "setExternalProcesses",
-      processes: [...processes],
+  // Desktop telemetry refreshes this process set on every sample.
+  const setExternalProcesses: NativeTelemetryClient["Service"]["setExternalProcesses"] =
+    Effect.fnUntraced(function* (processes) {
+      yield* Ref.set(externalProcesses, [...processes]);
+      const current = yield* Ref.get(state);
+      if (!canCommandNativeTelemetrySidecar(current.status, Option.isSome(current.handle))) return;
+      yield* writeCommand(Option.getOrThrow(current.handle), {
+        version: RESOURCE_MONITOR_PROTOCOL_VERSION,
+        type: "setExternalProcesses",
+        processes: [...processes],
+      });
     });
-  });
 
   const readHistory: NativeTelemetryClient["Service"]["readHistory"] = Effect.fn(
     "NativeTelemetryClient.readHistory",
