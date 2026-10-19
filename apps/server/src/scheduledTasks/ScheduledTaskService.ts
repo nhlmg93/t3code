@@ -281,8 +281,8 @@ function webhookEndpoint(
   };
 }
 
-const decodeRow = (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) =>
-  Effect.gen(function* () {
+const decodeRow = Effect.fn("ScheduledTaskService.decodeRow")(
+  function* (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) {
     const schedule = yield* decodeScheduleJson(row.schedule_json);
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
     const workspaceStrategy = yield* decodeWorkspaceStrategyJson(row.workspace_strategy_json);
@@ -310,15 +310,18 @@ const decodeRow = (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) =
       runCount: row.run_count,
       ...(webhook === undefined ? {} : { webhook }),
     });
-  }).pipe(
-    Effect.mapError((cause) => {
-      const taskId = decodeTaskId(row.task_id);
-      return taskError("Could not decode schedule task row.", {
-        ...(Option.isSome(taskId) ? { taskId: taskId.value } : {}),
-        cause,
-      });
-    }),
-  );
+  },
+  (effect, row, _origin?) =>
+    effect.pipe(
+      Effect.mapError((cause) => {
+        const taskId = decodeTaskId(row.task_id);
+        return taskError("Could not decode schedule task row.", {
+          ...(Option.isSome(taskId) ? { taskId: taskId.value } : {}),
+          cause,
+        });
+      }),
+    ),
+);
 
 export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(function* (
   now: DateTime.DateTime,
@@ -639,8 +642,8 @@ export const layer = Layer.effect(
     // the task forever (it filters out 'running' rows) nor re-fires it
     // immediately: the dispatch may already have gone out, so next_run_at must
     // advance and run_count must count the attempt.
-    const releaseStuckRun = (task: ScheduledTask, message: string) =>
-      Effect.gen(function* () {
+    const releaseStuckRun = Effect.fn("ScheduledTaskService.releaseStuckRun")(
+      function* (task: ScheduledTask, message: string) {
         const now = yield* localNow;
         const reread = yield* Effect.result(findTask(task.id));
         if (Result.isSuccess(reread) && reread.success === null) return;
@@ -655,14 +658,17 @@ export const layer = Layer.effect(
           WHERE task_id = ${task.id} AND last_run_status = 'running'
         `;
         yield* notifyChanged;
-      }).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("Could not release stuck schedule task run", {
-            taskId: task.id,
-            cause,
-          }),
+      },
+      (effect, task, _message) =>
+        effect.pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not release stuck schedule task run", {
+              taskId: task.id,
+              cause,
+            }),
+          ),
         ),
-      );
+    );
 
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
@@ -935,130 +941,131 @@ export const layer = Layer.effect(
         }),
       );
 
-    const upsert: ScheduledTaskService["Service"]["upsert"] = (input) =>
-      Effect.gen(function* () {
-        const now = yield* localNow;
-        const uuid =
-          input.commandId === undefined
-            ? yield* crypto
-                .randomUUIDv4()
-                .pipe(
-                  Effect.mapError((cause) =>
-                    taskError("Could not generate schedule task id.", { cause }),
-                  ),
-                )
-            : null;
-        const id =
-          input.id ??
-          ScheduledTaskId.make(
-            input.commandId ? `scheduled-task:${input.commandId}` : `scheduled-task:${uuid}`,
-          );
-        // Look up by the *resolved* id so idempotent creates (commandId replays)
-        // keep their run history, and so real load failures propagate instead
-        // of silently resetting an existing row.
-        const existingTask = yield* findTask(id);
-        // Keep the existing next_run_at when the schedule itself is untouched:
-        // editing a title or prompt must not postpone (or resurrect) a due
-        // run — only schedule/enabled changes restart the clock.
-        const schedule: ScheduledTask["schedule"] =
-          input.schedule.type === "webhook"
-            ? {
-                type: "webhook",
-                signature:
-                  input.schedule.signature == null
-                    ? null
-                    : {
-                        header: input.schedule.signature.header.toLowerCase(),
-                        encoding: input.schedule.signature.encoding,
-                        prefix: input.schedule.signature.prefix,
-                      },
-                maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
+    const upsert: ScheduledTaskService["Service"]["upsert"] = Effect.fn(
+      "ScheduledTaskService.upsert",
+    )(function* (input) {
+      const now = yield* localNow;
+      const uuid =
+        input.commandId === undefined
+          ? yield* crypto
+              .randomUUIDv4()
+              .pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not generate schedule task id.", { cause }),
+                ),
+              )
+          : null;
+      const id =
+        input.id ??
+        ScheduledTaskId.make(
+          input.commandId ? `scheduled-task:${input.commandId}` : `scheduled-task:${uuid}`,
+        );
+      // Look up by the *resolved* id so idempotent creates (commandId replays)
+      // keep their run history, and so real load failures propagate instead
+      // of silently resetting an existing row.
+      const existingTask = yield* findTask(id);
+      // Keep the existing next_run_at when the schedule itself is untouched:
+      // editing a title or prompt must not postpone (or resurrect) a due
+      // run — only schedule/enabled changes restart the clock.
+      const schedule: ScheduledTask["schedule"] =
+        input.schedule.type === "webhook"
+          ? {
+              type: "webhook",
+              signature:
+                input.schedule.signature == null
+                  ? null
+                  : {
+                      header: input.schedule.signature.header.toLowerCase(),
+                      encoding: input.schedule.signature.encoding,
+                      prefix: input.schedule.signature.prefix,
+                    },
+              maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
+            }
+          : input.schedule;
+      const webhook =
+        input.schedule.type === "webhook"
+          ? yield* Effect.gen(function* () {
+              const existing = existingTask === null ? null : yield* findWebhookCredentials(id);
+              const token = existing?.token ?? (yield* newWebhookToken);
+              const signature = input.schedule.type === "webhook" ? input.schedule.signature : null;
+              // A secretRef is a value the user entered for an agent; this
+              // save consumes it, so it cannot be used again. A replay of a
+              // save that already used it keeps the secret that save stored.
+              const replay = input.commandId !== undefined && existing?.secret != null;
+              const fromRef =
+                signature?.secretRef === undefined
+                  ? undefined
+                  : yield* secretRequests
+                      .consume({ ref: signature.secretRef, projectId: input.projectId })
+                      .pipe(
+                        Effect.catch((error) =>
+                          replay
+                            ? Effect.succeed(undefined)
+                            : Effect.fail(taskError(error.message, { taskId: id })),
+                        ),
+                      );
+              // A ref, when given, is the only source: a plain secret sent
+              // alongside it must not replace what a replayed save stored.
+              const provided = signature?.secretRef === undefined ? signature?.secret : fromRef;
+              const secret = signature == null ? null : (provided ?? existing?.secret ?? null);
+              const secretChanged =
+                signature == null || provided !== undefined || existing === null;
+              if (signature != null && secret === null) {
+                return yield* taskError("A webhook signature check needs a signing secret.", {
+                  taskId: id,
+                });
               }
-            : input.schedule;
-        const webhook =
-          input.schedule.type === "webhook"
-            ? yield* Effect.gen(function* () {
-                const existing = existingTask === null ? null : yield* findWebhookCredentials(id);
-                const token = existing?.token ?? (yield* newWebhookToken);
-                const signature =
-                  input.schedule.type === "webhook" ? input.schedule.signature : null;
-                // A secretRef is a value the user entered for an agent; this
-                // save consumes it, so it cannot be used again. A replay of a
-                // save that already used it keeps the secret that save stored.
-                const replay = input.commandId !== undefined && existing?.secret != null;
-                const fromRef =
-                  signature?.secretRef === undefined
-                    ? undefined
-                    : yield* secretRequests
-                        .consume({ ref: signature.secretRef, projectId: input.projectId })
-                        .pipe(
-                          Effect.catch((error) =>
-                            replay
-                              ? Effect.succeed(undefined)
-                              : Effect.fail(taskError(error.message, { taskId: id })),
-                          ),
-                        );
-                // A ref, when given, is the only source: a plain secret sent
-                // alongside it must not replace what a replayed save stored.
-                const provided = signature?.secretRef === undefined ? signature?.secret : fromRef;
-                const secret = signature == null ? null : (provided ?? existing?.secret ?? null);
-                const secretChanged =
-                  signature == null || provided !== undefined || existing === null;
-                if (signature != null && secret === null) {
-                  return yield* taskError("A webhook signature check needs a signing secret.", {
-                    taskId: id,
-                  });
-                }
-                return { token, secret, secretChanged };
-              })
-            : { token: null, secret: null, secretChanged: true };
-        const workspaceStrategy: ScheduledTask["workspaceStrategy"] =
-          input.workspaceStrategy.type === "worktree" &&
-          (yield* managedFolders.isScratchProject(input.projectId))
-            ? { type: "root" }
-            : input.workspaceStrategy;
-        const scheduleUnchanged =
-          existingTask !== null &&
-          existingTask.enabled === input.enabled &&
-          isSameSchedule(existingTask.schedule, schedule);
-        const task: ScheduledTask = {
-          id,
-          title: input.title,
-          prompt: input.prompt,
-          enabled: input.enabled,
-          schedule,
-          projectId: input.projectId,
-          threadId: input.threadId ?? null,
-          workspaceStrategy,
-          modelSelection: input.modelSelection,
-          runtimeMode: input.runtimeMode,
-          interactionMode: input.interactionMode,
-          createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
-          creationSource: input.creationSource ?? "web",
-          createdAt: existingTask?.createdAt ?? iso(now),
-          updatedAt: iso(now),
-          nextRunAt: scheduleUnchanged
-            ? existingTask.nextRunAt
-            : nextRunAt({ enabled: input.enabled, schedule }, now),
-          lastRunAt: existingTask?.lastRunAt ?? null,
-          lastRunStatus: existingTask?.lastRunStatus ?? "never",
-          lastRunError: existingTask?.lastRunError ?? null,
-          runCount: existingTask?.runCount ?? 0,
-        };
-        yield* saveTask(task, input.requireExisting === true, webhook);
-        yield* notifyChanged;
-        return { task: (yield* findTask(id)) ?? task };
-      });
+              return { token, secret, secretChanged };
+            })
+          : { token: null, secret: null, secretChanged: true };
+      const workspaceStrategy: ScheduledTask["workspaceStrategy"] =
+        input.workspaceStrategy.type === "worktree" &&
+        (yield* managedFolders.isScratchProject(input.projectId))
+          ? { type: "root" }
+          : input.workspaceStrategy;
+      const scheduleUnchanged =
+        existingTask !== null &&
+        existingTask.enabled === input.enabled &&
+        isSameSchedule(existingTask.schedule, schedule);
+      const task: ScheduledTask = {
+        id,
+        title: input.title,
+        prompt: input.prompt,
+        enabled: input.enabled,
+        schedule,
+        projectId: input.projectId,
+        threadId: input.threadId ?? null,
+        workspaceStrategy,
+        modelSelection: input.modelSelection,
+        runtimeMode: input.runtimeMode,
+        interactionMode: input.interactionMode,
+        createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
+        creationSource: input.creationSource ?? "web",
+        createdAt: existingTask?.createdAt ?? iso(now),
+        updatedAt: iso(now),
+        nextRunAt: scheduleUnchanged
+          ? existingTask.nextRunAt
+          : nextRunAt({ enabled: input.enabled, schedule }, now),
+        lastRunAt: existingTask?.lastRunAt ?? null,
+        lastRunStatus: existingTask?.lastRunStatus ?? "never",
+        lastRunError: existingTask?.lastRunError ?? null,
+        runCount: existingTask?.runCount ?? 0,
+      };
+      yield* saveTask(task, input.requireExisting === true, webhook);
+      yield* notifyChanged;
+      return { task: (yield* findTask(id)) ?? task };
+    });
 
-    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
-      Effect.gen(function* () {
-        const existing = yield* loadTask(input.id);
-        if (existing.enabled === input.enabled) return { task: existing };
-        const now = yield* localNow;
-        const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
-        // RETURNING so a task deleted between the load and this UPDATE is a
-        // visible not-found error, not a false success.
-        const updated = yield* sql<{ task_id: string }>`
+    const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = Effect.fn(
+      "ScheduledTaskService.setEnabled",
+    )(function* (input) {
+      const existing = yield* loadTask(input.id);
+      if (existing.enabled === input.enabled) return { task: existing };
+      const now = yield* localNow;
+      const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
+      // RETURNING so a task deleted between the load and this UPDATE is a
+      // visible not-found error, not a false success.
+      const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET enabled = ${input.enabled ? 1 : 0},
               next_run_at = ${next},
@@ -1066,18 +1073,18 @@ export const layer = Layer.effect(
           WHERE task_id = ${input.id}
           RETURNING task_id
         `.pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not update schedule task.", { taskId: input.id, cause }),
-          ),
-        );
-        if (updated.length === 0) {
-          return yield* taskError("Schedule task not found.", { taskId: input.id });
-        }
-        yield* notifyChanged;
-        return {
-          task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
-        };
-      });
+        Effect.mapError((cause) =>
+          taskError("Could not update schedule task.", { taskId: input.id, cause }),
+        ),
+      );
+      if (updated.length === 0) {
+        return yield* taskError("Schedule task not found.", { taskId: input.id });
+      }
+      yield* notifyChanged;
+      return {
+        task: { ...existing, enabled: input.enabled, nextRunAt: next, updatedAt: iso(now) },
+      };
+    });
 
     const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
       deleteRow(input.id).pipe(
@@ -1099,48 +1106,50 @@ export const layer = Layer.effect(
         Effect.as({ id: input.id }),
       );
 
-    const runNow: ScheduledTaskService["Service"]["runNow"] = (input: ScheduledTaskRunNowInput) =>
-      Effect.gen(function* () {
-        const task = yield* loadTask(input.id);
-        if (task.schedule.type === "webhook") {
-          return yield* taskError("Webhook tasks run when their URL receives a request.", {
-            taskId: input.id,
-          });
-        }
-        const next = yield* runTask(task, "manual").pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not run schedule task.", { taskId: input.id, cause }),
-          ),
-        );
-        return { task: next };
-      });
+    const runNow: ScheduledTaskService["Service"]["runNow"] = Effect.fn(
+      "ScheduledTaskService.runNow",
+    )(function* (input: ScheduledTaskRunNowInput) {
+      const task = yield* loadTask(input.id);
+      if (task.schedule.type === "webhook") {
+        return yield* taskError("Webhook tasks run when their URL receives a request.", {
+          taskId: input.id,
+        });
+      }
+      const next = yield* runTask(task, "manual").pipe(
+        Effect.mapError((cause) =>
+          taskError("Could not run schedule task.", { taskId: input.id, cause }),
+        ),
+      );
+      return { task: next };
+    });
 
-    const rotateWebhookToken: ScheduledTaskService["Service"]["rotateWebhookToken"] = (input) =>
-      Effect.gen(function* () {
-        const task = yield* loadTask(input.id);
-        if (task.schedule.type !== "webhook") {
-          return yield* taskError("Only webhook tasks have a URL token.", { taskId: input.id });
-        }
-        const token = yield* newWebhookToken;
-        const now = yield* localNow;
-        // Matching created_at keeps a rotation from landing on a task deleted
-        // and recreated under the same id since it was loaded.
-        const updated = yield* sql<{ task_id: string }>`
+    const rotateWebhookToken: ScheduledTaskService["Service"]["rotateWebhookToken"] = Effect.fn(
+      "ScheduledTaskService.rotateWebhookToken",
+    )(function* (input) {
+      const task = yield* loadTask(input.id);
+      if (task.schedule.type !== "webhook") {
+        return yield* taskError("Only webhook tasks have a URL token.", { taskId: input.id });
+      }
+      const token = yield* newWebhookToken;
+      const now = yield* localNow;
+      // Matching created_at keeps a rotation from landing on a task deleted
+      // and recreated under the same id since it was loaded.
+      const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET webhook_token = ${token}, updated_at = ${iso(now)}
           WHERE task_id = ${input.id} AND created_at = ${task.createdAt}
           RETURNING task_id
         `.pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not rotate webhook token.", { taskId: input.id, cause }),
-          ),
-        );
-        if (updated.length === 0) {
-          return yield* taskError("Schedule task was deleted or replaced.", { taskId: input.id });
-        }
-        yield* notifyChanged;
-        return { task: yield* loadTask(input.id) };
-      });
+        Effect.mapError((cause) =>
+          taskError("Could not rotate webhook token.", { taskId: input.id, cause }),
+        ),
+      );
+      if (updated.length === 0) {
+        return yield* taskError("Schedule task was deleted or replaced.", { taskId: input.id });
+      }
+      yield* notifyChanged;
+      return { task: yield* loadTask(input.id) };
+    });
 
     const deliveryHeaders = (row: WebhookDeliveryRow): Readonly<Record<string, string>> =>
       Option.getOrElse(decodeHeadersJson(row.headers_json), () => ({}));
@@ -1171,31 +1180,32 @@ export const layer = Layer.effect(
         ),
       );
 
-    const getWebhookDelivery: ScheduledTaskService["Service"]["getWebhookDelivery"] = (input) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<WebhookDeliveryRow>`
+    const getWebhookDelivery: ScheduledTaskService["Service"]["getWebhookDelivery"] = Effect.fn(
+      "ScheduledTaskService.getWebhookDelivery",
+    )(function* (input) {
+      const rows = yield* sql<WebhookDeliveryRow>`
           SELECT * FROM scheduled_task_webhook_deliveries
           WHERE task_id = ${input.id} AND delivery_id = ${input.deliveryId}
         `.pipe(
-          Effect.mapError((cause) =>
-            taskError("Could not load webhook delivery.", { taskId: input.id, cause }),
-          ),
-        );
-        const row = rows[0];
-        if (row === undefined) {
-          return yield* taskError("Webhook delivery not found.", { taskId: input.id });
-        }
-        return {
-          delivery: {
-            ...decodeDeliverySummary(row),
-            query: row.query,
-            headers: deliveryHeaders(row),
-            body: row.body,
-            bodyTruncated: row.body_truncated === 1,
-            renderedPrompt: row.rendered_prompt,
-          },
-        };
-      });
+        Effect.mapError((cause) =>
+          taskError("Could not load webhook delivery.", { taskId: input.id, cause }),
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        return yield* taskError("Webhook delivery not found.", { taskId: input.id });
+      }
+      return {
+        delivery: {
+          ...decodeDeliverySummary(row),
+          query: row.query,
+          headers: deliveryHeaders(row),
+          body: row.body,
+          bodyTruncated: row.body_truncated === 1,
+          renderedPrompt: row.rendered_prompt,
+        },
+      };
+    });
 
     const recordDelivery = (input: {
       readonly id: string;
@@ -1298,43 +1308,43 @@ export const layer = Layer.effect(
         },
       );
 
-    const webhookPermit = (id: ScheduledTaskId) =>
-      Effect.gen(function* () {
-        const existing = (yield* Ref.get(webhookPermits)).get(id);
-        if (existing !== undefined) return existing;
-        const created = yield* Semaphore.make(1);
-        return yield* Ref.modify(webhookPermits, (permits) => {
-          const raced = permits.get(id);
-          return raced === undefined
-            ? [created, new Map(permits).set(id, created)]
-            : [raced, permits];
-        });
+    const webhookPermit = Effect.fn("ScheduledTaskService.webhookPermit")(function* (
+      id: ScheduledTaskId,
+    ) {
+      const existing = (yield* Ref.get(webhookPermits)).get(id);
+      if (existing !== undefined) return existing;
+      const created = yield* Semaphore.make(1);
+      return yield* Ref.modify(webhookPermits, (permits) => {
+        const raced = permits.get(id);
+        return raced === undefined
+          ? [created, new Map(permits).set(id, created)]
+          : [raced, permits];
       });
+    });
 
     const serviceScope = yield* Effect.scope;
 
-    const observeDelivery = (
+    const observeDelivery = Effect.fn("ScheduledTaskService.observeDelivery")(function* (
       request: WebhookTriggerRequest,
       outcome: WebhookDeliveryOutcome,
       receivedAt: DateTime.DateTime | undefined,
       now: DateTime.DateTime | undefined,
-    ) =>
-      Effect.gen(function* () {
-        const source = request.relayDeliveryId === undefined ? "direct" : "relay";
-        yield* Effect.annotateCurrentSpan({
-          "scheduled_task.webhook.outcome": outcome,
-          "scheduled_task.webhook.source": source,
-        });
-        yield* Metrics.increment(Metrics.webhookDeliveriesTotal, { outcome, source });
-        if (request.receivedAt !== undefined && receivedAt !== undefined && now !== undefined) {
-          const heldMs = Math.max(
-            0,
-            DateTime.toEpochMillis(now) - DateTime.toEpochMillis(receivedAt),
-          );
-          yield* Effect.annotateCurrentSpan({ "scheduled_task.webhook.held_ms": heldMs });
-          yield* Metric.update(Metrics.webhookHeldDelay, Duration.millis(heldMs));
-        }
+    ) {
+      const source = request.relayDeliveryId === undefined ? "direct" : "relay";
+      yield* Effect.annotateCurrentSpan({
+        "scheduled_task.webhook.outcome": outcome,
+        "scheduled_task.webhook.source": source,
       });
+      yield* Metrics.increment(Metrics.webhookDeliveriesTotal, { outcome, source });
+      if (request.receivedAt !== undefined && receivedAt !== undefined && now !== undefined) {
+        const heldMs = Math.max(
+          0,
+          DateTime.toEpochMillis(now) - DateTime.toEpochMillis(receivedAt),
+        );
+        yield* Effect.annotateCurrentSpan({ "scheduled_task.webhook.held_ms": heldMs });
+        yield* Metric.update(Metrics.webhookHeldDelay, Duration.millis(heldMs));
+      }
+    });
 
     const triggerWebhook: ScheduledTaskService["Service"]["triggerWebhook"] = (request) =>
       triggerWebhookUnobserved(request).pipe(
@@ -1350,8 +1360,8 @@ export const layer = Layer.effect(
         }),
       );
 
-    const triggerWebhookUnobserved = (request: WebhookTriggerRequest) =>
-      Effect.gen(function* () {
+    const triggerWebhookUnobserved = Effect.fn("ScheduledTaskService.triggerWebhookUnobserved")(
+      function* (request: WebhookTriggerRequest) {
         const taskId = decodeTaskId(request.hookId);
         const notFound = observeDelivery(request, "not_found", undefined, undefined).pipe(
           Effect.as({ _tag: "not_found" as const }),
@@ -1595,7 +1605,8 @@ export const layer = Layer.effect(
             return { _tag: "accepted" as const, deliveryId, outcome: "accepted" as const };
           }).pipe(Effect.onError(() => releaseClaim(undefined))),
         );
-      });
+      },
+    );
 
     return ScheduledTaskService.of({
       list,

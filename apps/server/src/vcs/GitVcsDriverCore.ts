@@ -598,14 +598,16 @@ const nowUnixNano = DateTime.now.pipe(
   Effect.map((now) => BigInt(DateTime.toEpochMillis(now)) * 1_000_000n),
 );
 
-const addCurrentSpanEvent = (name: string, attributes: Record<string, unknown>) =>
-  Effect.gen(function* () {
-    const span = yield* Effect.currentSpan;
-    const timestamp = yield* nowUnixNano;
-    yield* Effect.sync(() => {
-      span.event(name, timestamp, compactTraceAttributes(attributes));
-    });
-  }).pipe(
+const addCurrentSpanEvent =
+  /* This helper annotates the existing operation span. */
+  Effect.fnUntraced(
+    function* (name: string, attributes: Record<string, unknown>) {
+      const span = yield* Effect.currentSpan;
+      const timestamp = yield* nowUnixNano;
+      yield* Effect.sync(() => {
+        span.event(name, timestamp, compactTraceAttributes(attributes));
+      });
+    },
     Effect.catchTags({
       NoSuchElementError: () => Effect.void,
     }),
@@ -1438,15 +1440,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }),
     },
   );
-  const invalidateStatusStaticCaches = (cwd: string) =>
-    Effect.gen(function* () {
+  const invalidateStatusStaticCaches = Effect.fn("GitVcsDriverCore.invalidateStatusStaticCaches")(
+    function* (cwd: string) {
       const repositoryPaths = yield* resolveRepositoryPaths(cwd).pipe(
         Effect.catchTags({ GitCommandError: () => Effect.succeed(null) }),
       );
       const cacheKey = repositoryPaths?.gitCommonDir ?? normalizeRepositoryPathsCacheKey(cwd);
       yield* Cache.invalidate(defaultBranchCache, cacheKey);
       yield* Cache.invalidate(originExistsCache, cacheKey);
-    });
+    },
+  );
 
   const resolveGitCommonDir = Effect.fn("resolveGitCommonDir")(function* (cwd: string) {
     const repositoryPaths = yield* resolveRepositoryPaths(cwd);
