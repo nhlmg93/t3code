@@ -728,10 +728,11 @@ export const make = Effect.gen(function* () {
 
   // Many environments never link, so while unlinked the retry backs off from 5
   // s to 60 s. A linked environment keeps the 5 s retry, because `t3 connect
-  // publish` can turn publishing on from another process.
-  const publishActiveThreadsOnceWhenConfigured = Effect.fn(
-    "AgentAwarenessRelay.publishActiveThreadsOnceWhenConfigured",
-  )(function* (logEnabledWhenReady: boolean) {
+  // publish` can turn publishing on from another process. Keep this untraced:
+  // an unlinked environment can retry for the lifetime of the process.
+  const publishActiveThreadsOnceWhenConfigured = Effect.fnUntraced(function* (
+    logEnabledWhenReady: boolean,
+  ) {
     let unlinkedRetryDelayMs = 5_000;
     while (!(yield* Ref.get(activeSnapshotPublishedRef))) {
       const result = yield* publishActiveThreadsUnsafe.pipe(

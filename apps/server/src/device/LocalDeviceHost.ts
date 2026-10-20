@@ -457,8 +457,9 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       Effect.ignoreCause,
     );
 
+  // Waits for the hub's lifetime and re-forks on restart; a span would nest across restarts.
   const superviseHub: (hub: HubProcess, hubTool: DeviceToolPaths) => Effect.Effect<void> =
-    Effect.fn("LocalDeviceHost.superviseHub")(
+    Effect.fnUntraced(
       function* (hub: HubProcess, hubTool: DeviceToolPaths) {
         yield* Effect.result(hub.child.exitCode);
         const running = yield* Ref.get(runningRef);

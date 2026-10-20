@@ -281,7 +281,8 @@ function webhookEndpoint(
   };
 }
 
-const decodeRow = Effect.fn("ScheduledTaskService.decodeRow")(
+// Runs per task row; list and lookup operations already own the span.
+const decodeRow = Effect.fnUntraced(
   function* (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) {
     const schedule = yield* decodeScheduleJson(row.schedule_json);
     const webhook = schedule.type === "webhook" ? webhookEndpoint(row, origin) : undefined;
