@@ -5,12 +5,7 @@
  * server only honors when its `shellRevealInFileManager` config flag is set,
  * so both actions work for every client and connection mode.
  */
-import {
-  EDITORS,
-  type ContextMenuItem,
-  type EditorId,
-  type EnvironmentId,
-} from "@t3tools/contracts";
+import { type ContextMenuItem, type EnvironmentId } from "@t3tools/contracts";
 import { useCallback, useMemo } from "react";
 
 import { resolveDiffPathForWorkspace } from "./diffFileActions";
@@ -25,13 +20,16 @@ import { useAtomCommand } from "./state/use-atom-command";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { toastManager } from "./components/ui/toast";
 import { useAtomValue } from "@effect/atom-react";
+import { CLIENT_EDITORS, type ClientEditorId } from "./clientEditor";
+import { useEditorAvailability } from "./clientEditors";
+import { useOpenEditor } from "./editorPreferences";
 
 export type FileContextMenuAction =
   | "reveal-in-folder"
   | "open"
   /** Submenu parent; never the activated id. */
   | "open-with"
-  | `editor:${EditorId}`;
+  | `editor:${ClientEditorId}`;
 
 export interface FileContextMenuTarget {
   readonly environmentId: EnvironmentId | null;
@@ -63,12 +61,14 @@ export function resolveFileContextMenuAbsolutePath(target: FileContextMenuTarget
   return resolvePathLinkTarget(workspaceFilePath, target.workspaceRoot);
 }
 
-const EDITOR_LABEL_BY_ID = new Map(EDITORS.map((editor) => [editor.id, editor.label]));
+const EDITOR_LABEL_BY_ID = new Map<ClientEditorId, string>(
+  CLIENT_EDITORS.map((editor) => [editor.id, editor.label]),
+);
 
 export interface FileContextMenuCapabilities {
   readonly revealLabel: string | undefined;
   readonly canOpenDefault: boolean;
-  readonly editorIds: ReadonlyArray<EditorId>;
+  readonly editorIds: ReadonlyArray<ClientEditorId>;
 }
 
 /**
@@ -116,6 +116,8 @@ export function buildFileContextMenuItems(input: {
 export function useFileContextMenu(environmentId: EnvironmentId | null) {
   const openInEditor = useAtomCommand(shellEnvironment.openInEditor, { reportFailure: false });
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const { editors } = useEditorAvailability(environmentId, serverConfig?.availableEditors ?? []);
+  const launchEditor = useOpenEditor(environmentId);
 
   return useMemo(() => {
     const availableEditors = serverConfig?.availableEditors ?? [];
@@ -131,7 +133,7 @@ export function useFileContextMenu(environmentId: EnvironmentId | null) {
             : revealInFileExplorerLabelForKind(serverConfig.shellRevealInFileManagerKind)
           : undefined,
       canOpenDefault: availableEditors.includes("file-manager"),
-      editorIds: availableEditors,
+      editorIds: editors,
     };
 
     const activate = async (
@@ -145,13 +147,20 @@ export function useFileContextMenu(environmentId: EnvironmentId | null) {
       const editor =
         action === "open" || reveal
           ? ("file-manager" as const)
-          : (action.slice("editor:".length) as EditorId);
+          : (action.slice("editor:".length) as ClientEditorId);
       if (action !== "open" && !reveal && !capabilities.editorIds.includes(editor)) return;
 
-      const result = await openInEditor({
-        environmentId,
-        input: { cwd: absolutePath, editor, ...(reveal ? { reveal: true } : {}) },
-      });
+      const result =
+        !reveal && action !== "open"
+          ? await launchEditor(editor, absolutePath)
+          : await openInEditor({
+              environmentId,
+              input: {
+                cwd: absolutePath,
+                editor: "file-manager",
+                ...(reveal ? { reveal: true } : {}),
+              },
+            });
       if (result._tag !== "Failure") return;
       toastManager.add({
         type: "error",
@@ -190,7 +199,7 @@ export function useFileContextMenu(environmentId: EnvironmentId | null) {
       activate,
       show,
     };
-  }, [environmentId, openInEditor, serverConfig]);
+  }, [environmentId, openInEditor, serverConfig, editors, launchEditor]);
 }
 
 /** Convenience callback for onContextMenu handlers. */

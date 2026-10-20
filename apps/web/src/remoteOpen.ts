@@ -129,13 +129,15 @@ export function useRemoteOpenState(environmentId: EnvironmentId | null): RemoteO
 const REMOTE_FALLBACK_EDITORS: ReadonlyArray<EditorId> = ["vscode"];
 
 let cachedProbedEditors: ReadonlyArray<EditorId> | null = null;
+let pendingProbedEditors: Promise<ReadonlyArray<EditorId>> | null = null;
 
-export function useRemoteCapableEditors(): ReadonlyArray<EditorId> {
+export function useRemoteCapableEditors(enabled = true): ReadonlyArray<EditorId> {
   const [editors, setEditors] = useState<ReadonlyArray<EditorId>>(
     () => cachedProbedEditors ?? REMOTE_FALLBACK_EDITORS,
   );
 
   useEffect(() => {
+    if (!enabled) return;
     if (cachedProbedEditors !== null) {
       return;
     }
@@ -145,24 +147,28 @@ export function useRemoteCapableEditors(): ReadonlyArray<EditorId> {
       return;
     }
     let cancelled = false;
-    probe().then(
+    // File links can mount many consumers together. Share the in-flight scan,
+    // not just its result, so opening a transcript doesn't fan out IPC probes.
+    pendingProbedEditors ??= probe().then(
       (ids) => {
         const remoteCapable = ids.filter((id) => REMOTE_CAPABLE_EDITOR_IDS.includes(id));
         cachedProbedEditors = remoteCapable.length > 0 ? remoteCapable : REMOTE_FALLBACK_EDITORS;
-        if (!cancelled) {
-          setEditors(cachedProbedEditors);
-        }
+        return cachedProbedEditors;
       },
       () => {
         cachedProbedEditors = REMOTE_FALLBACK_EDITORS;
+        return cachedProbedEditors;
       },
     );
+    void pendingProbedEditors.then((ids) => {
+      if (!cancelled) setEditors(ids);
+    });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [enabled]);
 
-  return editors;
+  return cachedProbedEditors ?? editors;
 }
 
 /**

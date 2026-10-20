@@ -182,6 +182,49 @@ running is left alone.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+### Open in Neovim (desktop)
+
+On Linux and macOS, install Neovim on the computer that owns the checkout and
+choose **Neovim** from the thread's **Open in…** picker. **Open in Neovim** uses
+the viewing computer's default terminal. That choice also applies to the
+favorite-editor shortcut and file links, including line and column positions.
+Choose another editor in the picker to switch back. Restart T3 Code after
+installing tools or changing the default terminal.
+
+On Linux, T3 Code uses `xdg-terminal-exec` and its configured desktop or
+system default. Configure your terminal's desktop-entry ID in
+`~/.config/xdg-terminals.list` (or your desktop's `*-xdg-terminals.list`).
+Unconfigured `xdg-terminal-exec` can pick an arbitrary installed terminal;
+T3 Code deliberately rejects that fallback. Alternatively, export `TERMINAL`
+in your login-shell environment as a **single executable name or absolute
+path**, without options, quotes, or shell commands. Supported direct launchers
+are Kitty, Ghostty, Alacritty, WezTerm, GNOME Terminal, Konsole, foot, and xterm.
+`TERM` describes terminal capabilities and is not used to select an application.
+
+On macOS, T3 Code asks LaunchServices which application opens `.command` files.
+This is the system's shell-script document association, not the `ssh://`
+association or the terminal from which T3 Code happened to start. Set the
+`.command` default application in Finder's file information if necessary.
+Supported applications are Terminal, iTerm2, Kitty, Ghostty, Alacritty, and
+WezTerm. Terminal and iTerm2 may require granting T3 Code Automation access when
+macOS prompts. Unknown associations and unsupported launchers are not replaced
+with another installed app; configure a supported default instead.
+
+For a remote environment, the terminal opens on your viewing computer and runs
+Neovim over SSH in the exact remote checkout or worktree. It does not open a GUI
+on the server or copy the project locally. The saved SSH connection alias takes
+precedence over the host's advertised Tailscale or local-network name. Configure
+the SSH user, port, and identity in your viewing computer's `~/.ssh/config`, and
+verify that you can connect from that computer. Tailscale SSH or a reachable SSH
+server is required even when T3 Code itself connects through a relay.
+Authentication and host-key prompts appear in the terminal. After SSH exits,
+press Enter to close the session; errors remain visible until then.
+
+Neovim is detected on `PATH`, in mise's shims or `neovim/latest` installation,
+and in Homebrew's standard paths. No custom launcher helper is required.
+Browser, Windows, and phone clients retain their existing editor options; this
+option requires the updated Linux or macOS desktop app.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same

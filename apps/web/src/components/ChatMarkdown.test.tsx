@@ -69,6 +69,7 @@ vi.mock("../state/entities", () => ({
 }));
 vi.mock("../remoteOpen", () => ({
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }),
+  useRemoteCapableEditors: () => [],
 }));
 vi.mock("../editorPreferences", () => ({
   useOpenInPreferredEditor: () => vi.fn(),

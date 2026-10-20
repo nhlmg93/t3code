@@ -1,21 +1,19 @@
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import {
   AuthOrchestrationOperateScope,
-  buildRemoteOpenUrl,
   EditorId,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../keybindings";
-import { usePreferredEditor } from "../../editorPreferences";
+import { useOpenEditor, usePreferredEditor } from "../../editorPreferences";
+import { useEditorAvailability } from "../../clientEditors";
+import type { ClientEditorId } from "../../clientEditor";
+import { toastManager } from "../ui/toast";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { editorLabelForPlatform } from "../../editorLabels";
-import {
-  openRemoteEditorUrl,
-  useRemoteCapableEditors,
-  useRemoteOpenHint,
-  useRemoteOpenState,
-} from "../../remoteOpen";
+import { useRemoteOpenHint } from "../../remoteOpen";
 import { useEnvironment } from "../../state/environments";
 import { ChevronDownIcon, FolderClosedIcon, SquareArrowOutUpRightIcon } from "lucide-react";
 
@@ -38,6 +36,7 @@ import {
   FinderIcon,
   Icon,
   KiroIcon,
+  NeovimIcon,
   TraeIcon,
   VisualStudioCode,
   VisualStudioCodeInsiders,
@@ -59,8 +58,6 @@ import {
   WebStormIcon,
 } from "../JetBrainsIcons";
 import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
-import { shellEnvironment } from "~/state/shell";
-import { useAtomCommand } from "~/state/use-atom-command";
 import {
   THREAD_DETAILS_PANEL_CHEVRON_CLASS,
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -74,15 +71,16 @@ import { useComposerMenuState } from "./useComposerMenuState";
 type OpenInOption = {
   label: string;
   Icon: Icon;
-  value: EditorId;
+  value: ClientEditorId;
   kind: "brand" | "generic";
 };
 
 export const resolveOpenInOptions = (
   platform: string,
-  availableEditors: ReadonlyArray<EditorId>,
+  availableEditors: ReadonlyArray<ClientEditorId>,
 ) => {
   const baseOptions: ReadonlyArray<Omit<OpenInOption, "label">> = [
+    { Icon: NeovimIcon, value: "neovim", kind: "brand" },
     {
       Icon: CursorIcon,
       value: "cursor",
@@ -225,19 +223,19 @@ export const OpenInPicker = memo(function OpenInPicker({
   const isPanel = displayMode === "panel";
   const ActionGroup = isPanel ? "div" : Group;
   const panelAnchorRef = useRef<HTMLDivElement | null>(null);
-  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
-  const remote = useRemoteOpenState(environmentId);
+  const launchEditor = useOpenEditor(environmentId);
+  const {
+    remote,
+    editors: effectiveEditors,
+    isResolved,
+  } = useEditorAvailability(environmentId, availableEditors);
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const isHostEditorDenied = remote.mode === "local-exec" && !canOperateHost;
-  const canOpenEditor = remote.mode !== "remote-unavailable" && !isHostEditorDenied;
+  const canOpenEditor = isResolved && remote.mode !== "remote-unavailable" && !isHostEditorDenied;
   const [menuOpen, setMenuOpen] = useComposerMenuState(isHostEditorDenied);
-  const remoteCapableEditors = useRemoteCapableEditors();
   const [remoteHintSeen, markRemoteHintSeen] = useRemoteOpenHint();
   const environmentLabel = useEnvironment(environmentId)?.label ?? "this machine";
-  // Remote mode ignores the server's PATH probe: what matters is what runs on
-  // the viewing machine, which only the desktop app can probe.
-  const effectiveEditors = remote.mode === "local-exec" ? availableEditors : remoteCapableEditors;
-  const [preferredEditor, setPreferredEditor] = usePreferredEditor(effectiveEditors);
+  const [preferredEditor, setPreferredEditor] = usePreferredEditor(effectiveEditors, isResolved);
   const options = useMemo(
     () => resolveOpenInOptions(navigator.platform, effectiveEditors),
     [effectiveEditors],
@@ -245,43 +243,29 @@ export const OpenInPicker = memo(function OpenInPicker({
   const primaryOption = options.find(({ value }) => value === preferredEditor) ?? null;
 
   const openInEditor = useCallback(
-    (editorId: EditorId | null) => {
+    async (editorId: ClientEditorId | null) => {
       if (!openInCwd) return;
       const editor = editorId ?? preferredEditor;
       if (!editor) return;
-      if (remote.mode === "remote-unavailable") return;
-      if (remote.mode === "remote-links") {
-        const url = buildRemoteOpenUrl({
-          editor,
-          host: remote.host.host,
-          absolutePath: openInCwd,
-        });
-        if (url === undefined) return;
-        // Only record hint-seen/preferred when the shell actually accepted
-        // the URL (an older desktop build can refuse the editor scheme).
-        void openRemoteEditorUrl(url).then((opened) => {
-          if (!opened) return;
-          markRemoteHintSeen();
-          setPreferredEditor(editor);
+      if (!canOpenEditor) return;
+      const result = await launchEditor(editor, openInCwd);
+      if (result._tag === "Failure") {
+        toastManager.add({
+          type: "error",
+          title: `Could not open in ${editorLabelForPlatform(editor, navigator.platform)}`,
+          description: String(squashAtomCommandFailure(result)),
         });
         return;
       }
-      if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
-      const result = openInEditorMutation({
-        environmentId,
-        input: {
-          cwd: openInCwd,
-          editor,
-        },
-      });
+      if (remote.mode === "remote-links") markRemoteHintSeen();
       setPreferredEditor(editor);
       return result;
     },
     [
-      environmentId,
       markRemoteHintSeen,
       openInCwd,
-      openInEditorMutation,
+      launchEditor,
+      canOpenEditor,
       preferredEditor,
       remote,
       setPreferredEditor,
@@ -320,7 +304,12 @@ export const OpenInPicker = memo(function OpenInPicker({
     preferredEditor,
     remote.mode,
   ]);
-  const primaryLabel = isPanel ? `Open in ${primaryOption?.label ?? "editor"}` : "Open";
+  const primaryLabel =
+    primaryOption?.value === "neovim"
+      ? "Open in Neovim"
+      : isPanel
+        ? `Open in ${primaryOption?.label ?? "editor"}`
+        : "Open";
 
   const editorItems = (
     <>
@@ -332,7 +321,7 @@ export const OpenInPicker = memo(function OpenInPicker({
         <>
           {options.length === 0 && (
             <MenuItem density={presentation === "menu" ? "touch" : "default"} disabled>
-              No installed editors found
+              {isResolved ? "No installed editors found" : "Loading editors…"}
             </MenuItem>
           )}
           {options.map(({ label, Icon, value, kind }) => (
@@ -401,7 +390,11 @@ export const OpenInPicker = memo(function OpenInPicker({
         : {})}
     >
       <ThreadDetailsControl
-        aria-label={compact ? "Open file in preferred editor" : primaryLabel}
+        aria-label={
+          compact && primaryOption?.value !== "neovim"
+            ? "Open file in preferred editor"
+            : primaryLabel
+        }
         size={isPanel ? "sm" : "xs"}
         variant={isPanel ? "ghost" : "outline"}
         part="primary"

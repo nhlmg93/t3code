@@ -5,9 +5,12 @@ import {
   SshConnectionTarget,
 } from "@t3tools/client-runtime/connection";
 import { buildRemoteOpenUrl, EnvironmentId } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { createElement, useEffect } from "react";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import type { EditorId } from "@t3tools/contracts";
 
-import { resolveRemoteOpenState } from "./remoteOpen";
+import { resolveRemoteOpenState, useRemoteCapableEditors } from "./remoteOpen";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -23,6 +26,44 @@ const TAILSCALE_TARGETS = [
   { kind: "tailscale", host: "sol.tail1234.ts.net" },
   { kind: "mdns", host: "sol.local" },
 ] as const;
+
+it("shares one in-flight desktop editor scan across concurrent file-link consumers", async () => {
+  let resolveProbe!: (ids: readonly EditorId[]) => void;
+  const pending = new Promise<readonly EditorId[]>((resolve) => {
+    resolveProbe = resolve;
+  });
+  const probe = vi.fn().mockReturnValue(pending);
+  const seen = new Map<number, readonly EditorId[]>();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("window", { desktopBridge: { probeRemoteEditors: probe } });
+  function Consumer({ id }: { id: number }) {
+    const editors = useRemoteCapableEditors();
+    useEffect(() => {
+      seen.set(id, editors);
+    }, [id, editors]);
+    return null;
+  }
+  let renderer: ReactTestRenderer | undefined;
+  try {
+    await act(async () => {
+      renderer = create(
+        createElement(
+          "div",
+          null,
+          ...[1, 2, 3].map((id) => createElement(Consumer, { id, key: id })),
+        ),
+      );
+    });
+    expect(probe).toHaveBeenCalledOnce();
+    await act(async () => {
+      resolveProbe(["kiro", "zed"]);
+    });
+    expect([...seen.values()]).toEqual([["zed"], ["zed"], ["zed"]]);
+  } finally {
+    await act(async () => renderer?.unmount());
+    vi.unstubAllGlobals();
+  }
+});
 
 describe("resolveRemoteOpenState", () => {
   it("keeps exec behavior for a loopback primary target", () => {

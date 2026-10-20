@@ -1,4 +1,9 @@
-import { AuthOrchestrationOperateScope, EnvironmentId, type EditorId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  EnvironmentId,
+  type EditorId,
+  type NeovimAvailability,
+} from "@t3tools/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { AsyncResult } from "effect/reactivity";
 import { cloneElement, useState, type ReactElement, type ReactNode } from "react";
@@ -42,11 +47,11 @@ vi.mock("../../editorPreferences", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../editorPreferences")>();
   return {
     ...actual,
-    usePreferredEditor: (available: readonly EditorId[]) => {
-      const [preferred, setPreferred] = actual.usePreferredEditor(available);
+    usePreferredEditor: (available: readonly ClientEditorId[], isResolved = true) => {
+      const [preferred, setPreferred] = actual.usePreferredEditor(available, isResolved);
       return [
         preferred,
-        (editor: EditorId) => {
+        (editor: ClientEditorId) => {
           state.setPreferred(editor);
           setPreferred(editor);
         },
@@ -56,6 +61,7 @@ vi.mock("../../editorPreferences", async (importOriginal) => {
 });
 vi.mock("../../remoteOpen", () => ({
   useRemoteOpenState: () => state.remote,
+  useRemoteOpenResolution: () => ({ state: state.remote, isResolved: true }),
   useRemoteCapableEditors: () => state.clientEditors,
   useRemoteOpenHint: () => [false, state.markHintSeen],
   openRemoteEditorUrl: state.openUrl,
@@ -106,6 +112,10 @@ vi.mock("../ui/menu", () => ({
 }));
 
 import { OpenInPicker } from "./OpenInPicker";
+import type { ClientEditorId } from "../../clientEditor";
+import { useOpenFavoriteEditorShortcut } from "./OpenInPickerShortcut";
+import { NeovimIcon } from "../Icons";
+import { useOpenInPreferredEditor } from "../../editorPreferences";
 
 const primary = EnvironmentId.make("primary");
 const selected = EnvironmentId.make("selected");
@@ -174,6 +184,29 @@ function primaryButton() {
 
 function keyboardEvent() {
   return { preventDefault: vi.fn() } as unknown as KeyboardEvent;
+}
+
+function deferNeovimProbe() {
+  let resolve!: (value: NeovimAvailability) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<NeovimAvailability>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+// The same preferred-editor launch path used by markdown/diff file links.
+function FileLinkAndShortcut() {
+  const openFile = useOpenInPreferredEditor(selected, editors);
+  useOpenFavoriteEditorShortcut({
+    enabled: true,
+    environmentId: selected,
+    keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+    availableEditors: editors,
+    openInCwd: "/work/project",
+  });
+  return <a href="/work/project/file.ts" onClick={() => openFile("/work/project/file.ts:7:2")} />;
 }
 
 it.each(["local-exec", "remote-links"] as const)(
@@ -252,6 +285,32 @@ describe("host editor access", () => {
 });
 
 describe("client editor links", () => {
+  it.each(["local-exec", "remote-links"] as const)(
+    "keeps standalone web %s file links and shortcuts ready without desktop detection",
+    async (mode) => {
+      state.allowed.add(selected);
+      state.remote =
+        mode === "local-exec" ? { mode } : { mode, host: { kind: "ssh-alias", host: "test-host" } };
+      window.localStorage.setItem("t3code:last-editor", '"vscode"');
+      await act(async () => {
+        renderer = create(<FileLinkAndShortcut />);
+      });
+      await act(async () => {
+        const result = await renderer!.root.findByType("a").props.onClick();
+        expect(result).toMatchObject({ _tag: "Success", value: "vscode" });
+        state.keydown!(keyboardEvent());
+      });
+      if (mode === "local-exec") {
+        expect(state.run).toHaveBeenCalledTimes(2);
+        expect(state.openUrl).not.toHaveBeenCalled();
+      } else {
+        expect(state.openUrl).toHaveBeenCalledTimes(2);
+        expect(state.run).not.toHaveBeenCalled();
+      }
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscode"');
+    },
+  );
+
   it("opens an SSH editor URL without host operate permission", async () => {
     state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "test-host" } };
     await renderPicker();
@@ -277,4 +336,222 @@ describe("client editor links", () => {
     expect(state.setPreferred).not.toHaveBeenCalled();
     expect(state.markHintSeen).not.toHaveBeenCalled();
   });
+});
+
+describe("desktop Neovim", () => {
+  it.each([
+    { mode: "local-exec", panel: true },
+    { mode: "local-exec", panel: false },
+    { mode: "remote-links", panel: true },
+    { mode: "remote-links", panel: false },
+  ] as const)(
+    "does not replace saved Neovim from the pending $mode panel=$panel picker",
+    async ({ mode, panel }) => {
+      state.allowed.add(selected);
+      state.remote =
+        mode === "local-exec"
+          ? { mode }
+          : { mode, host: { kind: "ssh-alias", host: "my-workstation" } };
+      const deferred = deferNeovimProbe();
+      const probe = vi.fn(() => deferred.promise);
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, { desktopBridge: { neovim: { probe, open } } });
+      window.localStorage.setItem("t3code:last-editor", '"neovim"');
+      await renderPicker(editors, panel);
+      const button = renderer!.root.findByProps({
+        "aria-label": panel ? "Open in editor" : "Open file in preferred editor",
+        part: "primary",
+      });
+      expect(button.props.disabled).toBe(true);
+      await act(async () => button.props.onClick());
+      expect(state.keydown).toBeNull();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+      expect(state.setPreferred).not.toHaveBeenCalled();
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(open).not.toHaveBeenCalled();
+
+      await act(async () => deferred.resolve({ local: true, remote: true }));
+      const readyButton = renderer!.root.findByProps({ "aria-label": "Open in Neovim" });
+      expect(readyButton.props.disabled).toBe(false);
+      await act(async () => state.keydown!(keyboardEvent()));
+      await act(async () => readyButton.props.onClick());
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(open).toHaveBeenLastCalledWith({
+        targetPath: "/work/project",
+        ...(mode === "remote-links" ? { sshHost: "my-workstation" } : {}),
+      });
+      expect(probe).toHaveBeenCalledOnce();
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+    },
+  );
+
+  it.each(["local-exec", "remote-links"] as const)(
+    "keeps saved Neovim for file clicks and the standalone %s shortcut during detection",
+    async (mode) => {
+      state.allowed.add(selected);
+      state.remote =
+        mode === "local-exec"
+          ? { mode }
+          : { mode, host: { kind: "ssh-alias", host: "my-workstation" } };
+      const deferred = deferNeovimProbe();
+      const probe = vi.fn(() => deferred.promise);
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, { desktopBridge: { neovim: { probe, open } } });
+      window.localStorage.setItem("t3code:last-editor", '"neovim"');
+      await act(async () => {
+        renderer = create(<FileLinkAndShortcut />);
+      });
+      let pendingResult;
+      await act(async () => {
+        pendingResult = await renderer!.root.findByType("a").props.onClick();
+        state.keydown!(keyboardEvent());
+      });
+      expect(pendingResult).toMatchObject({ _tag: "Failure" });
+      expect(open).not.toHaveBeenCalled();
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+
+      await act(async () => deferred.resolve({ local: true, remote: true }));
+      await act(async () => {
+        const result = await renderer!.root.findByType("a").props.onClick();
+        expect(result).toMatchObject({ _tag: "Success", value: "neovim" });
+        state.keydown!(keyboardEvent());
+      });
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(open).toHaveBeenCalledWith({
+        targetPath: "/work/project/file.ts:7:2",
+        ...(mode === "remote-links" ? { sshHost: "my-workstation" } : {}),
+      });
+      expect(probe).toHaveBeenCalledOnce();
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+    },
+  );
+
+  it.each(["unavailable", "failed"] as const)(
+    "falls back only after detection is %s, keeping the existing unavailable-editor policy",
+    async (outcome) => {
+      state.allowed.add(selected);
+      const deferred = deferNeovimProbe();
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, {
+        desktopBridge: { neovim: { probe: () => deferred.promise, open } },
+      });
+      window.localStorage.setItem("t3code:last-editor", '"neovim"');
+      await act(async () => {
+        renderer = create(<FileLinkAndShortcut />);
+      });
+      await act(async () => renderer!.root.findByType("a").props.onClick());
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+      expect(state.run).not.toHaveBeenCalled();
+      await act(async () => {
+        if (outcome === "failed") deferred.reject(new Error("IPC disconnected"));
+        else deferred.resolve({ local: false, remote: false });
+      });
+      await act(async () => renderer!.root.findByType("a").props.onClick());
+      expect(state.run).toHaveBeenCalledExactlyOnceWith({
+        environmentId: selected,
+        input: { cwd: "/work/project/file.ts:7:2", editor: "vscode" },
+      });
+      expect(open).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscode"');
+    },
+  );
+
+  it.each(["local-exec", "remote-links"] as const)(
+    "honors Neovim in the chat view's standalone %s favorite-editor shortcut",
+    async (mode) => {
+      if (mode === "local-exec") state.allowed.add(selected);
+      state.remote =
+        mode === "local-exec"
+          ? { mode }
+          : { mode, host: { kind: "tailscale", host: "workstation.tailnet.ts.net" } };
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, {
+        desktopBridge: {
+          neovim: {
+            probe: vi.fn().mockResolvedValue({ local: true, remote: true }),
+            open,
+          },
+        },
+      });
+      window.localStorage.setItem("t3code:last-editor", '"neovim"');
+      function ShortcutOnly() {
+        useOpenFavoriteEditorShortcut({
+          enabled: true,
+          environmentId: selected,
+          keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
+          availableEditors: editors,
+          openInCwd: "/work/project",
+        });
+        return null;
+      }
+      await act(async () => {
+        renderer = create(<ShortcutOnly />);
+      });
+      const event = keyboardEvent();
+      await act(async () => {
+        state.keydown!(event);
+      });
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(open).toHaveBeenCalledExactlyOnceWith({
+        targetPath: "/work/project",
+        ...(mode === "remote-links" ? { sshHost: "workstation.tailnet.ts.net" } : {}),
+      });
+      expect(state.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { mode: "local-exec", panel: true },
+    { mode: "local-exec", panel: false },
+    { mode: "remote-links", panel: true },
+    { mode: "remote-links", panel: false },
+  ] as const)(
+    "opens a $mode checkout from the panel=$panel control and can switch back to VS Code",
+    async ({ mode, panel }) => {
+      state.allowed.add(selected);
+      state.remote =
+        mode === "local-exec"
+          ? { mode }
+          : { mode, host: { kind: "ssh-alias", host: "my-workstation" } };
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, {
+        desktopBridge: {
+          neovim: {
+            probe: vi.fn().mockResolvedValue({ local: true, remote: true }),
+            open,
+          },
+        },
+      });
+      await renderPicker(editors, panel);
+      const button = renderer!.root.findByProps({ "aria-label": "Open in Neovim" });
+      expect(button.findAllByType(NeovimIcon)).toHaveLength(1);
+      await act(async () => button.props.onClick());
+      expect(open).toHaveBeenCalledExactlyOnceWith({
+        targetPath: "/work/project",
+        ...(mode === "remote-links" ? { sshHost: "my-workstation" } : {}),
+      });
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
+      await act(async () => {
+        renderer!.root.findByProps({ children: "VS Code" }).parent!.props.onClick();
+      });
+      await act(async () => {
+        renderer!.root
+          .findByProps({
+            "aria-label": panel ? "Open in VS Code" : "Open file in preferred editor",
+          })
+          .props.onClick();
+      });
+      expect(open).toHaveBeenCalledOnce();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscode"');
+    },
+  );
 });

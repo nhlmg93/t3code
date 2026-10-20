@@ -13,6 +13,7 @@ import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
 import type { EditorId } from "./editor.ts";
+import type { NeovimAvailability, OpenNeovimInput } from "./desktopEditor.ts";
 import type { PreviewForwardedShortcut } from "./keybindings.ts";
 
 import type {
@@ -1229,6 +1230,12 @@ export interface DesktopBridge {
    * builds lack it; callers fall back to VS Code only.
    */
   probeRemoteEditors?: () => Promise<readonly EditorId[]>;
+  /** Client-machine editor extension; never sent through environment RPC. */
+  neovim?: {
+    probe: () => Promise<NeovimAvailability>;
+    /** Null means the terminal launcher started; SSH/Neovim errors appear in that terminal. */
+    open: (input: OpenNeovimInput) => Promise<string | null>;
+  };
   /** Present when the desktop shell can perform an ordered plain-text paste. */
   pasteAsText?: () => Promise<void>;
   onMenuAction: (listener: (action: string) => void) => () => void;

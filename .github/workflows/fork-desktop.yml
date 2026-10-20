@@ -1,0 +1,223 @@
+name: Fork desktop and CLI
+
+# Artifact-only builds for nhlmg93's fork. No release publication, signing
+# credentials, deployment, or upstream desktop update feed.
+# GitHub only registers workflow_dispatch once this file exists on the fork's
+# default branch (main). Until then, deliberately push the tested commit to a
+# fork-build/* branch; the narrow push trigger works without main registration.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "fork-build/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'nhlmg93/t3code'
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            target: AppImage
+            arch: x64
+            rust_target: x86_64-unknown-linux-gnu
+            resource_key: linux-x64
+            cli_platform: linux
+          - runner: macos-26
+            platform: mac
+            target: dmg
+            arch: arm64
+            rust_target: aarch64-apple-darwin
+            resource_key: darwin-arm64
+            cli_platform: darwin
+    defaults:
+      run:
+        shell: bash
+    env:
+      T3CODE_DESKTOP_SIGNED: "false"
+      # Defense in depth; -pr.* versions omit publish configuration altogether.
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: nhlmg93/t3code
+    steps:
+      # Match upstream's checkout: .repos contains orphaned vendored gitlinks.
+      - name: Checkout selected ref
+        env:
+          CHECKOUT_REF: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Verify repository Node version
+        run: node -e 'if (process.versions.node.split(".")[0] !== "24") throw new Error("Repository commands require Node 24"); console.log(process.version)'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Linux build libraries
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsecret-1-dev pkg-config imagemagick
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Configure fork build
+        run: |
+          set -euo pipefail
+          # -pr.* disables the update feed without changing Beta's app identity.
+          version="0.1.0-pr.neovim.${GITHUB_RUN_NUMBER}"
+          echo "FORK_VERSION=$version" >> "$GITHUB_ENV"
+          node scripts/update-release-package-versions.ts "$version"
+          # Only public production identifiers; preserve existing Connect access.
+          cp .env.example .env
+
+      - name: Build desktop artifact
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          vp run dist:desktop:artifact \
+            --platform "$BUILD_PLATFORM" --target "$BUILD_TARGET" --arch "$BUILD_ARCH" \
+            --build-version "$FORK_VERSION" --output-dir release --verbose
+
+      # Match release-desktop.yml: repo scripts run with Node 24, but vp pack
+      # uses a pinned Node with --build-sea support. Keep this exact pin aligned
+      # with SEA_NODE_VERSION in apps/server/vite.config.ts. Build on the native
+      # runner so the executable and every native dependency can be exercised.
+      - name: Build CLI single-executable
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Stage resource monitor for the CLI archive
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+          RESOURCE_KEY: ${{ matrix.resource_key }}
+        run: |
+          set -euo pipefail
+          target_dir="$RUNNER_TEMP/cli-resource-monitor/$RESOURCE_KEY"
+          mkdir -p "$target_dir"
+          cp "native/resource-monitor/target/$RUST_TARGET/release/t3-resource-monitor" \
+            "$target_dir/t3-resource-monitor"
+
+      # This is the upstream service/SSH/install runtime archive, not a loose
+      # JS bundle: t3 + client + resource monitor + production native externals.
+      # No signing credentials: macOS CLI binaries/addons are signed ad hoc by
+      # build-cli-archive.ts, not Developer ID signed or notarized.
+      - name: Build CLI archive
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          node scripts/build-cli-archive.ts \
+            --platform "$BUILD_PLATFORM" --arch "$BUILD_ARCH" --version "$FORK_VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test isolated CLI archive
+        env:
+          CLI_PLATFORM: ${{ matrix.cli_platform }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Upstream smoke test extracts to scratch, empties PATH, runs --version,
+          # and serves the web client with an isolated home (no host service).
+          node scripts/smoke-cli-archive.ts \
+            --archive "release-cli/t3-${FORK_VERSION}-${CLI_PLATFORM}-${BUILD_ARCH}.tar.gz" \
+            --expect-version "$FORK_VERSION"
+
+      - name: Verify no update feed is packaged
+        env:
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          check_dir="$RUNNER_TEMP/fork-payload"
+          mkdir -p "$check_dir"
+          if [[ "$BUILD_PLATFORM" == "mac" ]]; then
+            unzip -q "release/T3-Code-${FORK_VERSION}-arm64.zip" -d "$check_dir"
+            resources="$check_dir/T3 Code (Beta).app/Contents/Resources"
+          else
+            image="$(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -name '*.AppImage' -print -quit)"
+            test -n "$image"
+            chmod +x "$image"
+            (cd "$check_dir" && "$image" --appimage-extract >/dev/null)
+            resources="$check_dir/squashfs-root/resources"
+          fi
+          test -d "$resources"
+          test ! -e "$resources/app-update.yml"
+
+      - name: Record source and checksums
+        run: |
+          set -euo pipefail
+          printf 'repository=%s\ncommit=%s\nversion=%s\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$FORK_VERSION" > release/build.txt
+          cp release/build.txt release-cli/build.txt
+          (cd release && shasum -a 256 T3-Code-* > SHA256SUMS)
+          (cd release-cli && shasum -a 256 t3-*.tar.gz > SHA256SUMS)
+          {
+            printf '### Fork desktop and CLI: %s-%s\n' "${{ matrix.platform }}" "${{ matrix.arch }}"
+            printf 'Commit: %s · version: %s\n\n' "$GITHUB_SHA" "$FORK_VERSION"
+            printf '%s\n' \
+              'Artifact-only: no deployment, service restart, npm publication, or GitHub release.' \
+              'macOS desktop is unsigned; CLI is ad hoc signed. Neither is notarized.' \
+              'Verify SHA256SUMS and build.txt before staging. Keep the existing T3 home, service identity, flags, and credentials.' \
+              'CLI update discovery still targets upstream; do not run an unversioned t3 update to maintain this fork.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/T3-Code-*.AppImage
+            release/T3-Code-*.deb
+            release/T3-Code-*.dmg
+            release/T3-Code-*.zip
+            release/SHA256SUMS
+            release/build.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload self-contained CLI runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-cli-${{ matrix.cli_platform }}-${{ matrix.arch }}
+          path: |
+            release-cli/t3-*.tar.gz
+            release-cli/SHA256SUMS
+            release-cli/build.txt
+          if-no-files-found: error
+          retention-days: 14

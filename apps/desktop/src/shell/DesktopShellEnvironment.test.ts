@@ -120,6 +120,32 @@ function runShellEnvironment(input: {
 }
 
 describe("DesktopShellEnvironment", () => {
+  it.effect(
+    "hydrates the terminal override and XDG search paths without replacing inherited choices",
+    () =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = {
+          SHELL: "/bin/sh",
+          PATH: "/usr/bin",
+          XDG_CONFIG_DIRS: "/inherited",
+        };
+        yield* runShellEnvironment({
+          env,
+          platform: "linux",
+          handler: () =>
+            envOutput({
+              PATH: "/usr/bin",
+              TERMINAL: "/home/test/tools/kitty",
+              XDG_CONFIG_DIRS: "/shell-config",
+              XDG_DATA_DIRS: "/shell-data",
+            }),
+        });
+        assert.equal(env.TERMINAL, "/home/test/tools/kitty");
+        assert.equal(env.XDG_CONFIG_DIRS, "/inherited");
+        assert.equal(env.XDG_DATA_DIRS, "/shell-data");
+      }),
+  );
+
   it.effect("rejects PATH output from a failed shell and tries the next candidate", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = { SHELL: "/bin/failing", PATH: "/usr/bin" };
