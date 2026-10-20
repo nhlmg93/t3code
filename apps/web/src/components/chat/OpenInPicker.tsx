@@ -280,6 +280,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   useEffect(() => {
     if (!enableShortcut || !canOpenEditor) return;
     const handler = (e: globalThis.KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat) return;
       if (!isOpenFavoriteEditorShortcut(e, keybindings)) return;
       if (!openInCwd) return;
       if (!preferredEditor) return;

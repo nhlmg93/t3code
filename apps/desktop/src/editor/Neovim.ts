@@ -13,6 +13,7 @@ import {
   resolveDefaultTerminal,
   terminalInvocation,
 } from "./DefaultTerminal.ts";
+import { isClientLocalSshTarget } from "./NeovimTarget.ts";
 
 class NeovimError extends Schema.TaggedError<NeovimError>()("NeovimError", {
   reason: Schema.Literals(["unsupported", "target", "host", "terminal", "nvim", "ssh", "spawn"]),
@@ -103,7 +104,11 @@ const launch = Effect.fn("desktop.editor.Neovim.launch")(function* (input: OpenN
   let argv: string[];
   let cwd: string | undefined;
 
-  if (input.sshHost !== undefined) {
+  const clientLocal =
+    input.sshHost !== undefined &&
+    tools.ssh !== null &&
+    (yield* isClientLocalSshTarget(tools.ssh, input.sshHost));
+  if (input.sshHost !== undefined && !clientLocal) {
     if (tools.ssh === null) return yield* new NeovimError({ reason: "ssh" });
     // No local stat/cwd: this path belongs exclusively to the remote environment.
     // Known install paths also work in non-interactive SSH shells without mise activation.

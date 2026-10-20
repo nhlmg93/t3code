@@ -24,6 +24,7 @@ export function useOpenFavoriteEditorShortcut({
   useEffect(() => {
     if (!enabled) return;
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat) return;
       if (!isOpenFavoriteEditorShortcut(event, keybindings)) return;
       if (!openInCwd) return;
 
