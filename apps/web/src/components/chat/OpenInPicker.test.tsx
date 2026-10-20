@@ -434,7 +434,7 @@ describe("desktop Neovim", () => {
   );
 
   it.each(["unavailable", "failed"] as const)(
-    "falls back only after detection is %s, keeping the existing unavailable-editor policy",
+    "does not fall back to hidden editors when detection is %s",
     async (outcome) => {
       state.allowed.add(selected);
       const deferred = deferNeovimProbe();
@@ -453,13 +453,15 @@ describe("desktop Neovim", () => {
         if (outcome === "failed") deferred.reject(new Error("IPC disconnected"));
         else deferred.resolve({ local: false, remote: false });
       });
-      await act(async () => renderer!.root.findByType("a").props.onClick());
-      expect(state.run).toHaveBeenCalledExactlyOnceWith({
-        environmentId: selected,
-        input: { cwd: "/work/project/file.ts:7:2", editor: "vscode" },
+      await act(async () => {
+        expect(await renderer!.root.findByType("a").props.onClick()).toMatchObject({
+          _tag: "Failure",
+        });
       });
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
       expect(open).not.toHaveBeenCalled();
-      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscode"');
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
     },
   );
 
@@ -513,7 +515,7 @@ describe("desktop Neovim", () => {
     { mode: "remote-links", panel: true },
     { mode: "remote-links", panel: false },
   ] as const)(
-    "opens a $mode checkout from the panel=$panel control and can switch back to VS Code",
+    "hides fork desktop options in the $mode panel=$panel picker and can switch to Zed",
     async ({ mode, panel }) => {
       state.allowed.add(selected);
       state.remote =
@@ -529,7 +531,13 @@ describe("desktop Neovim", () => {
           },
         },
       });
-      await renderPicker(editors, panel);
+      const detected = ["cursor", "vscode", "vscode-insiders", "zed"] as const;
+      state.clientEditors = detected;
+      window.localStorage.setItem("t3code:last-editor", '"vscode"');
+      await renderPicker(detected, panel);
+      for (const label of ["Cursor", "VS Code", "VS Code Insiders"]) {
+        expect(renderer!.root.findAllByProps({ children: label })).toHaveLength(0);
+      }
       const button = renderer!.root.findByProps({ "aria-label": "Open in Neovim" });
       expect(button.findAllByType(NeovimIcon)).toHaveLength(1);
       await act(async () => button.props.onClick());
@@ -541,17 +549,48 @@ describe("desktop Neovim", () => {
       expect(state.openUrl).not.toHaveBeenCalled();
       expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
       await act(async () => {
-        renderer!.root.findByProps({ children: "VS Code" }).parent!.props.onClick();
+        renderer!.root.findByProps({ children: "Zed" }).parent!.props.onClick();
       });
       await act(async () => {
         renderer!.root
           .findByProps({
-            "aria-label": panel ? "Open in VS Code" : "Open file in preferred editor",
+            "aria-label": panel ? "Open in Zed" : "Open file in preferred editor",
           })
           .props.onClick();
       });
       expect(open).toHaveBeenCalledOnce();
-      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"vscode"');
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"zed"');
+    },
+  );
+
+  it.each(["cursor", "vscode", "vscode-insiders"] as const)(
+    "replaces a saved hidden %s preference with Neovim for file clicks and shortcuts",
+    async (stored) => {
+      state.allowed.add(selected);
+      const open = vi.fn().mockResolvedValue(null);
+      Object.assign(window, {
+        desktopBridge: {
+          neovim: {
+            probe: vi.fn().mockResolvedValue({ local: true, remote: true }),
+            open,
+          },
+        },
+      });
+      window.localStorage.setItem("t3code:last-editor", JSON.stringify(stored));
+      await act(async () => {
+        renderer = create(<FileLinkAndShortcut />);
+      });
+      await act(async () => {
+        expect(await renderer!.root.findByType("a").props.onClick()).toMatchObject({
+          _tag: "Success",
+          value: "neovim",
+        });
+        state.keydown!(keyboardEvent());
+      });
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(state.run).not.toHaveBeenCalled();
+      expect(state.openUrl).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("t3code:last-editor")).toBe('"neovim"');
     },
   );
 });

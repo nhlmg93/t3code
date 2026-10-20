@@ -7,9 +7,18 @@ import { ClientEditorId } from "./clientEditor";
 import { EditorId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useEffect } from "react";
+import { buildFileContextMenuItems } from "./fileContextMenu";
 
 const isClientEditorId = Schema.is(ClientEditorId);
 const isWireEditorId = Schema.is(EditorId);
+const detectedEditors = [
+  "cursor",
+  "vscode",
+  "vscode-insiders",
+  "zed",
+  "vscodium",
+  "file-manager",
+] as const;
 
 const state = vi.hoisted(() => ({
   remote: { mode: "local-exec" } as RemoteOpenState,
@@ -17,13 +26,13 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock("./remoteOpen", () => ({
   useRemoteOpenResolution: () => ({ state: state.remote, isResolved: state.resolved }),
-  useRemoteCapableEditors: () => ["vscode"],
+  useRemoteCapableEditors: () => detectedEditors,
 }));
 
 let renderer: ReactTestRenderer | undefined;
 let result: ReturnType<typeof useEditorAvailability>;
 function Consumer() {
-  const available = useEditorAvailability(EnvironmentId.make("selected"), ["cursor"]);
+  const available = useEditorAvailability(EnvironmentId.make("selected"), detectedEditors);
   useEffect(() => {
     result = available;
   }, [available]);
@@ -47,13 +56,13 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("leaves browser and older desktop choices unchanged", async () => {
+it("leaves browser choices unchanged", async () => {
   await render();
   expect(result.isResolved).toBe(true);
-  expect(result.editors).toEqual(["cursor"]);
+  expect(result.editors).toEqual(detectedEditors);
   state.remote = { mode: "remote-links", host: { kind: "tailscale", host: "workstation" } };
   await render();
-  expect(result.editors).toEqual(["vscode"]);
+  expect(result.editors).toEqual(detectedEditors);
   expect(result.isResolved).toBe(true);
 });
 
@@ -77,12 +86,12 @@ it("keeps detection pending until the shared desktop probe resolves", async () =
 
   await act(async () => resolveProbe({ local: true, remote: true }));
   expect(result.isResolved).toBe(true);
-  expect(result.editors).toEqual(["neovim", "cursor"]);
+  expect(result.editors).toEqual(["neovim", "zed", "vscodium", "file-manager"]);
   await act(async () => renderer?.unmount());
   renderer = undefined;
   await render();
   expect(result.isResolved).toBe(true);
-  expect(result.editors).toEqual(["neovim", "cursor"]);
+  expect(result.editors).toEqual(["neovim", "zed", "vscodium", "file-manager"]);
   expect(probe).toHaveBeenCalledOnce();
 });
 
@@ -90,10 +99,10 @@ it("adds a probed desktop editor only where it can run and probes once across re
   const probe = vi.fn().mockResolvedValue({ local: false, remote: true });
   vi.stubGlobal("window", { desktopBridge: { neovim: { probe } } });
   await render();
-  expect(result.editors).toEqual(["cursor"]);
+  expect(result.editors).toEqual(["zed", "vscodium", "file-manager"]);
   state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "workstation" } };
   await render();
-  expect(result.editors).toEqual(["neovim", "vscode"]);
+  expect(result.editors).toEqual(["neovim", "zed", "vscodium", "file-manager"]);
   await act(async () => renderer?.unmount());
   renderer = undefined;
   await render();
@@ -117,10 +126,10 @@ it("does not mistake unresolved remote metadata for a local checkout", async () 
   expect(result.editors).toEqual([]);
   state.resolved = true;
   await render();
-  expect(result.editors).toEqual(["neovim", "cursor"]);
+  expect(result.editors).toEqual(["neovim", "zed", "vscodium", "file-manager"]);
 });
 
-it("keeps standard editor options when the desktop probe fails", async () => {
+it("keeps only allowed editor options when the desktop probe fails", async () => {
   vi.stubGlobal("window", {
     desktopBridge: {
       neovim: {
@@ -129,9 +138,40 @@ it("keeps standard editor options when the desktop probe fails", async () => {
     },
   });
   await render();
-  expect(result.editors).toEqual(["cursor"]);
+  expect(result.editors).toEqual(["zed", "vscodium", "file-manager"]);
   expect(result.isResolved).toBe(true);
 });
+
+it.each(["local-exec", "remote-links"] as const)(
+  "hides desktop editors from the %s file menu even without Neovim IPC",
+  async (mode) => {
+    vi.stubGlobal("window", { desktopBridge: {} });
+    state.remote =
+      mode === "local-exec" ? { mode } : { mode, host: { kind: "ssh-alias", host: "workstation" } };
+    await render();
+    expect(result.editors).toEqual(["zed", "vscodium", "file-manager"]);
+    expect(
+      buildFileContextMenuItems({
+        hasAbsolutePath: true,
+        capabilities: {
+          revealLabel: undefined,
+          canOpenDefault: true,
+          editorIds: result.editors,
+        },
+      }),
+    ).toEqual([
+      { id: "open", label: "Open", icon: "pencil" },
+      {
+        id: "open-with",
+        label: "Open with",
+        children: [
+          { id: "editor:zed", label: "Zed" },
+          { id: "editor:vscodium", label: "VSCodium" },
+        ],
+      },
+    ]);
+  },
+);
 
 it("keeps the extended preference out of the wire EditorId decoder", () => {
   expect(isClientEditorId("neovim")).toBe(true);

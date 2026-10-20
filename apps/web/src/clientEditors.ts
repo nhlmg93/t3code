@@ -63,7 +63,13 @@ export function useEditorAvailability(
   const editors = useMemo<readonly ClientEditorId[]>(() => {
     // A not-yet-loaded catalog is not evidence that a path is client-local.
     if (!isResolved || neovim === null || remote.mode === "remote-unavailable") return [];
-    const base = remote.mode === "local-exec" ? serverEditors : clientEditors;
+    const detected = remote.mode === "local-exec" ? serverEditors : clientEditors;
+    // Fork desktop policy: hide these apps from every editor menu and fallback,
+    // without changing installed apps, browser choices, or the server catalog.
+    const base =
+      typeof window !== "undefined" && window.desktopBridge !== undefined
+        ? detected.filter((id) => id !== "cursor" && id !== "vscode" && id !== "vscode-insiders")
+        : detected;
     const available = remote.mode === "local-exec" ? neovim.local : neovim.remote;
     return available ? ["neovim", ...base] : base;
   }, [isResolved, remote.mode, serverEditors, clientEditors, neovim]);
