@@ -862,9 +862,8 @@ const make = Effect.gen(function* () {
     }
     // A restart cuts a run and continues it as a new run. Follow that chain,
     // so a cut run is not the answer while its continuation is pending.
-    const outcome = Effect.fn("ThreadManagementService.outcome")(function* (
-      runs: ReadonlyArray<OrchestrationV2Run>,
-    ) {
+    // Runs per matching event and is already covered by the waitForThread span.
+    const outcome = Effect.fnUntraced(function* (runs: ReadonlyArray<OrchestrationV2Run>) {
       const current = runs.find((candidate) => candidate.id === selectedRun.id);
       if (current === undefined) {
         return yield* new ThreadManagementRunNotFoundError({

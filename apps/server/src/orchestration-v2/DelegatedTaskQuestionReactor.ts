@@ -58,9 +58,8 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const handle: DelegatedTaskQuestionReactor["Service"]["handle"] = Effect.fn(
-    "DelegatedTaskQuestionReactor.handle",
-  )(
+  // Runs for every domain event; most events return before any work is needed.
+  const handle: DelegatedTaskQuestionReactor["Service"]["handle"] = Effect.fnUntraced(
     function* (event) {
       if (event.type === "run.updated") {
         if (!["completed", "failed", "waiting"].includes(event.payload.status)) return;

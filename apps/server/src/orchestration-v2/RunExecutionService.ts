@@ -1021,7 +1021,8 @@ export const layer: Layer.Layer<
           }
           yield* Ref.set(rootRunFinalized, true);
         });
-        const trackChildLifecycle = Effect.fn("RunExecutionService.trackChildLifecycle")(function* (
+        // Runs for every provider event, including streamed text updates; avoid a per-event span.
+        const trackChildLifecycle = Effect.fnUntraced(function* (
           event: ProviderAdapter.ProviderAdapterV2Event,
           deliverable: boolean,
         ) {
