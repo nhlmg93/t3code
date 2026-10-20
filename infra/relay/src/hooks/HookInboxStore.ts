@@ -278,7 +278,8 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   let longestWaitMs = 0;
   const busyHooks = new Set<string>();
 
-  const annotateRun = Effect.fn("HookInboxStore.annotateRun")(function* (result: string) {
+  // Delivery results and counts belong to the enclosing deliverDue span.
+  const annotateRun = Effect.fnUntraced(function* (result: string) {
     const backlog = yield* backlogSize;
     yield* Effect.annotateCurrentSpan({
       "relay.inbox.run_result": result,

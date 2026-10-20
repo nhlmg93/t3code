@@ -356,10 +356,8 @@ const make = Effect.gen(function* () {
       headers: { ...forwardedHeaders(request.headers), [RELAY_HOOK_DELIVERY_HEADER]: proof },
       body: body.success,
     };
-    const holdOrFail = Effect.fn("HookForwarder.holdOrFail")(function* (
-      status: 503 | 504,
-      error: string,
-    ) {
+    // Keep offline outcomes on the enclosing relay.hooks.forward span.
+    const holdOrFail = Effect.fnUntraced(function* (status: 503 | 504, error: string) {
       if (!endpoint.holdWhileOffline) {
         yield* outcome(error);
         return errorResponse(status, error);

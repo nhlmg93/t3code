@@ -94,8 +94,9 @@ export const layer = HookInboxObject.make(
         if (current === null || current > at) yield* state.storage.setAlarm(at);
       });
 
+      // withInboxSpan supplies each method's root span; avoid a second wrapper span.
       return {
-        hold: Effect.fn("HookInboxObject.hold")(
+        hold: Effect.fnUntraced(
           function* (hook: HookInboxStore.HeldHook, baseUrl: string) {
             const dueAt = yield* run(HookInboxStore.hold(hook, baseUrl));
             yield* Effect.annotateCurrentSpan({ "relay.inbox.stored": dueAt !== null });
@@ -105,7 +106,7 @@ export const layer = HookInboxObject.make(
           },
           withInboxSpan("relay.inbox.hold", inboxId),
         ),
-        wake: Effect.fn("HookInboxObject.wake")(
+        wake: Effect.fnUntraced(
           function* (baseUrl: string) {
             const pending = yield* run(HookInboxStore.wake(baseUrl));
             yield* Effect.annotateCurrentSpan({ "relay.inbox.pending": pending });
@@ -114,7 +115,7 @@ export const layer = HookInboxObject.make(
           },
           withInboxSpan("relay.inbox.wake", inboxId),
         ),
-        clear: Effect.fn("HookInboxObject.clear")(
+        clear: Effect.fnUntraced(
           function* () {
             yield* run(HookInboxStore.clear);
             yield* state.storage.deleteAlarm();
